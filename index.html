@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TariffX AI - Customs Defense Engine</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #0f172a; color: #f8fafc; margin: 0; padding: 40px 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { font-size: 2.2rem; margin-bottom: 8px; color: #38bdf8; }
+        p.subtitle { color: #94a3b8; margin-bottom: 30px; }
+        .upload-card { background: #1e293b; border: 2px dashed #334155; border-radius: 12px; padding: 40px; text-align: center; cursor: pointer; transition: 0.2s; }
+        .upload-card:hover { border-color: #38bdf8; }
+        input[type="file"] { display: none; }
+        .btn { background: #0284c7; color: white; border: none; padding: 12px 24px; font-size: 1rem; font-weight: 600; border-radius: 8px; cursor: pointer; margin-top: 15px; }
+        .btn:hover { background: #0369a1; }
+        #status { margin-top: 20px; font-weight: bold; color: #38bdf8; display: none; }
+        .output-card { background: #1e293b; border-radius: 12px; padding: 30px; margin-top: 30px; display: none; white-space: pre-wrap; font-family: inherit; line-height: 1.6; border: 1px solid #334155; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TariffX AI</h1>
+        <p class="subtitle">Automated Customs Defense Brief Generator</p>
+
+        <div class="upload-card" onclick="document.getElementById('fileInput').click()">
+            <p id="fileNameDisplay">📁 Drag and drop your Commercial Invoice PDF here, or click to browse</p>
+            <input type="file" id="fileInput" accept=".pdf" onchange="handleFileSelect(event)">
+            <button class="btn" onclick="uploadPDF(event)">Generate Defense Brief</button>
+        </div>
+
+        <div id="status">⚡ Processing invoice, querying Pinecone precedents, and generating defense brief...</div>
+        <div id="output" class="output-card"></div>
+    </div>
+
+    <script>
+        let selectedFile = null;
+
+        function handleFileSelect(event) {
+            selectedFile = event.target.files[0];
+            if (selectedFile) {
+                document.getElementById('fileNameDisplay').innerText = `📄 Selected File: ${selectedFile.name}`;
+            }
+        }
+
+        async function uploadPDF(event) {
+            event.stopPropagation();
+            if (!selectedFile) {
+                alert("Please select a PDF file first!");
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append("file", selectedFile);
+
+            document.getElementById('status').style.display = 'block';
+            document.getElementById('output').style.display = 'none';
+
+            try {
+                const response = await fetch("http://127.0.0.1:8000/analyze-invoice", {
+                    method: "POST",
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                document.getElementById('status').style.display = 'none';
+
+                if (data.success) {
+                    document.getElementById('output').innerText = data.defense_brief;
+                    document.getElementById('output').style.display = 'block';
+                } else {
+                    alert("Error: " + (data.detail || "Failed to generate brief."));
+                }
+            } catch (err) {
+                document.getElementById('status').style.display = 'none';
+                alert("Could not connect to API server. Ensure python api.py is running!");
+            }
+        }
+    </script>
+</body>
+</html>

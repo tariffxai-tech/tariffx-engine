@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware  # <-- ADD THIS
 
 app = FastAPI(title="TariffX AI Engine")
 
-# <-- ADD THIS CORS BLOCK BELOW app = FastAPI() -->
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

@@ -6,11 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pinecone import Pinecone
 from pypdf import PdfReader
+import resend
 
-# 1. Initialize FastAPI Application
 app = FastAPI(title="TariffX AI Engine")
 
-# 2. Configure CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,10 +18,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 3. Initialize API Clients
 openai_api_key = os.getenv("OPENAI_API_KEY")
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
 pinecone_index_name = os.getenv("PINECONE_INDEX_NAME", "tariffx-htsus")
+resend_api_key = os.getenv("RESEND_API_KEY")
+notification_email = os.getenv("NOTIFICATION_EMAIL") # Your email address
+
+if resend_api_key:
+    resend.api_key = resend_api_key
 
 client = OpenAI(api_key=openai_api_key) if openai_api_key else None
 pc = Pinecone(api_key=pinecone_api_key) if pinecone_api_key else None
@@ -30,11 +33,7 @@ pc = Pinecone(api_key=pinecone_api_key) if pinecone_api_key else None
 
 @app.get("/")
 def read_root():
-    return {
-        "status": "online",
-        "service": "TariffX AI Engine API",
-        "docs": "/docs"
-    }
+    return {"status": "online", "service": "TariffX AI Engine API"}
 
 
 @app.post("/analyze-invoice")
@@ -49,7 +48,6 @@ async def analyze_invoice(
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     try:
-        # Read PDF File into memory
         contents = await file.read()
         pdf_file = io.BytesIO(contents)
         reader = PdfReader(pdf_file)
@@ -58,84 +56,60 @@ async def analyze_invoice(
         for page in reader.pages:
             extracted_text += page.extract_text() or ""
 
-        if not extracted_text.strip():
-            extracted_text = "Standard commercial invoice text processing (OCR fallback required)."
+        invoice_sample = extracted_text[:3000] if extracted_text.strip() else "PDF text extraction empty."
 
-        invoice_sample = extracted_text[:3000]
-
-        # --- Vector Search via Pinecone ---
+        # Vector Search
         precedent_matches = []
         if client and pc and pinecone_index_name:
             try:
-                emb_res = client.embeddings.create(
-                    input=invoice_sample[:1000],
-                    model="text-embedding-3-small"
-                )
+                emb_res = client.embeddings.create(input=invoice_sample[:1000], model="text-embedding-3-small")
                 vector = emb_res.data[0].embedding
-
                 index = pc.Index(pinecone_index_name)
                 query_res = index.query(vector=vector, top_k=3, include_metadata=True)
-
                 for match in query_res.get("matches", []):
                     metadata = match.get("metadata", {})
                     code = metadata.get("htsus_code", "HTSUS Match")
                     title = metadata.get("title", match.get("id", ""))
-                    precedent_matches.append(f"{code} - {title} (Score: {round(match.get('score', 0), 2)})")
-            except Exception as vector_err:
-                print(f"Pinecone Warning: {vector_err}")
-                precedent_matches = [
-                    "HTSUS 8471.30.01 - Automatic data processing machines",
-                    "Ruling HQ H301234 - Classification of composite assemblies"
-                ]
-        else:
-            precedent_matches = [
-                "HTSUS 8471.30.01 - Automatic data processing machines",
-                "Ruling HQ H301234 - Classification of composite assemblies"
-            ]
+                    precedent_matches.append(f"{code} - {title}")
+            except Exception as e:
+                print(f"Pinecone Warning: {e}")
 
-        # --- Defense Brief Generation via OpenAI GPT-4o ---
+        # Defense Brief
         if client:
-            system_prompt = (
-                "You are TariffX AI, a trade intelligence research engine. "
-                "Analyze the commercial invoice text and available HTSUS precedents. "
-                "Produce a structured Executive Defense Brief evaluating classification strategies, "
-                "potential duty mitigation opportunities, and key risks."
-            )
-
-            user_prompt = f"""
-            INVOICE DETAILS:
-            Filename: {file.filename}
-            Importer Company: {company or 'N/A'}
-            Import Volume: {import_volume or 'N/A'}
-            Extracted Content: {invoice_sample}
-
-            TOP MATCHING PRECEDENTS:
-            {json.dumps(precedent_matches, indent=2)}
-
-            Generate a concise, professional Defense Brief with:
-            1. Key Product Observations
-            2. Proposed HTSUS Classification Strategy
-            3. Precedent & Duty Risk Assessment
-            """
-
+            system_prompt = "You are TariffX AI. Generate a concise Defense Brief evaluating classification strategies."
+            user_prompt = f"Invoice: {file.filename}\nCompany: {company}\nExtracted: {invoice_sample}"
             gpt_res = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.2
+                ]
             )
             defense_brief = gpt_res.choices[0].message.content
         else:
-            defense_brief = (
-                f"Defense Brief for {file.filename}:\n\n"
-                "1. Product Analysis: Invoice items extracted and parsed.\n"
-                "2. HTSUS Strategy: Evaluated against primary tariff chapters.\n"
-                "3. Recommendation: Review precedents with trade counsel."
-            )
+            defense_brief = "Defense brief placeholder."
 
-        print(f"[LEAD CAPTURED] Name: {name} | Email: {email} | Company: {company} | Vol: {import_volume}")
+        # Send Lead Alert Email via Resend
+        if resend_api_key and notification_email:
+            try:
+                resend.Emails.send({
+                    "from": "TariffX AI <onboarding@resend.dev>",
+                    "to": [notification_email],
+                    "subject": f"🚨 New TariffX Lead: {company or name or 'New Submission'}",
+                    "html": f"""
+                        <h3>New Lead Captured on TariffX AI</h3>
+                        <p><strong>Name:</strong> {name}</p>
+                        <p><strong>Email:</strong> {email}</p>
+                        <p><strong>Company:</strong> {company}</p>
+                        <p><strong>Import Volume:</strong> {import_volume}</p>
+                        <p><strong>Filename:</strong> {file.filename}</p>
+                        <hr />
+                        <h4>AI Defense Brief Preview:</h4>
+                        <pre>{defense_brief}</pre>
+                    """
+                })
+            except Exception as email_err:
+                print(f"Email Dispatch Failed: {email_err}")
 
         return {
             "status": "success",

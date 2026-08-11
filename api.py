@@ -35,44 +35,74 @@ pc = Pinecone(api_key=pinecone_api_key) if pinecone_api_key else None
 
 
 def send_lead_notification(name: str, email: str, company: str, import_volume: str, filename: str, defense_brief: str, file_bytes: bytes = None):
-    """Sends background email alert with the attached invoice PDF when a new lead submits."""
-    if not resend_api_key or not notification_email:
-        print("[EMAIL SKIPPED] Resend API key or notification email not configured.")
+    """Sends background email alerts when a new lead submits."""
+    if not resend_api_key:
+        print("[EMAIL SKIPPED] Resend API key not configured.")
         return
 
-    try:
-        html_content = f"""
-        <h2>🚀 New TariffX AI Lead Captured!</h2>
-        <p><strong>Name:</strong> {name or 'N/A'}</p>
-        <p><strong>Email:</strong> {email or 'N/A'}</p>
-        <p><strong>Company:</strong> {company or 'N/A'}</p>
-        <p><strong>Annual Import Volume:</strong> {import_volume or 'N/A'}</p>
-        <p><strong>Uploaded File:</strong> {filename}</p>
-        <hr>
-        <h3>Generated Defense Brief Preview:</h3>
-        <pre style="font-family: sans-serif; white-space: pre-wrap; background: #f8fafc; padding: 12px; border-radius: 6px;">{defense_brief}</pre>
-        """
+    # --- 1. ADMIN ALERT EMAIL (To You) ---
+    if notification_email:
+        try:
+            admin_html = f"""
+            <h2>🚀 New TariffX AI Lead Captured!</h2>
+            <p><strong>Name:</strong> {name or 'N/A'}</p>
+            <p><strong>Email:</strong> {email or 'N/A'}</p>
+            <p><strong>Company:</strong> {company or 'N/A'}</p>
+            <p><strong>Annual Import Volume:</strong> {import_volume or 'N/A'}</p>
+            <p><strong>Uploaded File:</strong> {filename}</p>
+            <hr>
+            <h3>Generated Defense Brief Preview:</h3>
+            <pre style="font-family: sans-serif; white-space: pre-wrap; background: #f8fafc; padding: 12px; border-radius: 6px;">{defense_brief}</pre>
+            """
 
-        email_payload = {
-            "from": "TariffX Leads <onboarding@resend.dev>",
-            "to": [notification_email],
-            "subject": f"🔥 New Lead: {company or name or 'TariffX Visitor'}",
-            "html": html_content
-        }
+            admin_payload = {
+                "from": "TariffX Leads <onboarding@resend.dev>",
+                "to": [notification_email],
+                "subject": f"🔥 New Lead: {company or name or 'TariffX Visitor'}",
+                "html": admin_html
+            }
 
-        # Attach PDF invoice if file bytes are provided
-        if file_bytes and filename:
-            email_payload["attachments"] = [
-                {
-                    "filename": filename,
-                    "content": list(file_bytes)
-                }
-            ]
+            if file_bytes and filename:
+                admin_payload["attachments"] = [
+                    {
+                        "filename": filename,
+                        "content": list(file_bytes)
+                    }
+                ]
 
-        resend.Emails.send(email_payload)
-        print(f"[EMAIL SENT] Notification delivered with attachment to {notification_email}")
-    except Exception as e:
-        print(f"[EMAIL ERROR] Failed to send notification: {e}")
+            resend.Emails.send(admin_payload)
+            print(f"[EMAIL SENT] Admin notification delivered with attachment to {notification_email}")
+        except Exception as e:
+            print(f"[EMAIL ERROR] Failed to send admin notification: {e}")
+
+    # --- 2. PROSPECT CONFIRMATION EMAIL (Auto-Reply to Lead) ---
+    if email and email.strip():
+        try:
+            prospect_name = name if name else "there"
+            prospect_html = f"""
+            <div style="font-family: sans-serif; max-width: 600px; color: #333; line-height: 1.6;">
+                <h2>We received your commercial invoice, {prospect_name}!</h2>
+                <p>Thank you for submitting your invoice (<strong>{filename}</strong>) to TariffX AI.</p>
+                <p>Our trade intelligence engine has processed your document and generated an initial HTSUS classification defense analysis.</p>
+                <p>A trade specialist from our team will review the tariff precedents and follow up with you shortly if further duty mitigation opportunities are identified.</p>
+                <br>
+                <p>Best regards,</p>
+                <p><strong>TariffX AI Team</strong><br>
+                <a href="https://tariffx.ai" style="color: #2563eb;">tariffx.ai</a></p>
+            </div>
+            """
+
+            prospect_payload = {
+                "from": "TariffX AI <onboarding@resend.dev>",
+                "to": [email.strip()],
+                "subject": f"Invoice Received - TariffX AI Defense Brief for {company or filename}",
+                "html": prospect_html
+            }
+
+            resend.Emails.send(prospect_payload)
+            print(f"[EMAIL SENT] Confirmation email sent to prospect at {email.strip()}")
+        except Exception as e:
+            print(f"[EMAIL ERROR] Failed to send prospect confirmation: {e}")
 
 
 @app.get("/")
@@ -98,7 +128,7 @@ async def analyze_invoice(
     1. Extracts raw text from uploaded commercial invoice PDF.
     2. Embeds query text and retrieves top matching HTSUS precedent rulings from Pinecone.
     3. Generates an executive AI defense brief using GPT-4o.
-    4. Triggers background notification email with PDF attachment to admin.
+    4. Triggers background notification emails to admin & prospect.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
@@ -191,7 +221,7 @@ async def analyze_invoice(
                 "3. Recommendation: Review precedents with trade counsel."
             )
 
-        # Trigger background email alert with the attached PDF
+        # Trigger background email alerts (admin + prospect auto-reply)
         background_tasks.add_task(
             send_lead_notification,
             name=name,

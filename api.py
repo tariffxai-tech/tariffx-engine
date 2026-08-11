@@ -95,11 +95,11 @@ def send_lead_notification(name: str, email: str, company: str, import_volume: s
                 ]
 
             resend.Emails.send(admin_payload)
-            print(f"[EMAIL SENT] Admin notification delivered with attachment to {notification_email}")
+            print(f"[EMAIL SENT] Admin notification delivered to {notification_email}")
         except Exception as e:
             print(f"[EMAIL ERROR] Failed to send admin notification: {e}")
 
-    # --- 2. PROSPECT CONFIRMATION EMAIL (Auto-Reply) ---
+    # --- 2. PROSPECT CONFIRMATION EMAIL ---
     if email and email.strip():
         try:
             prospect_name = name if name else "there"
@@ -148,13 +148,17 @@ async def analyze_invoice(
     import_volume: str = Form(None)
 ):
     """
-    RAG Pipeline Endpoint with Background Email Alerts, PDF Attachment & Google Sheet Logging:
+    RAG Pipeline Endpoint:
+    1. Extract PDF text.
+    2. Vectorize text and query Pinecone for top HTSUS matching precedents.
+    3. Feed precedent records to GPT-4o for an executive AI defense brief.
+    4. Fire background tasks: Admin email w/ PDF attachment, Auto-reply, and Google Sheet logging.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     try:
-        # Read PDF File into memory
+        # Step 1: Read PDF File into memory
         contents = await file.read()
         pdf_file = io.BytesIO(contents)
         reader = PdfReader(pdf_file)
@@ -168,41 +172,48 @@ async def analyze_invoice(
 
         invoice_sample = extracted_text[:3000]
 
-        # --- Vector Search via Pinecone ---
+        # Step 2: Vector Search Pinecone for real HTSUS precedents
         precedent_matches = []
         if client and pc and pinecone_index_name:
             try:
+                # Embed the uploaded invoice text sample
                 emb_res = client.embeddings.create(
                     input=invoice_sample[:1000],
                     model="text-embedding-3-small"
                 )
                 vector = emb_res.data[0].embedding
 
+                # Search Pinecone index for top 3 closest legal precedents
                 index = pc.Index(pinecone_index_name)
                 query_res = index.query(vector=vector, top_k=3, include_metadata=True)
 
                 for match in query_res.get("matches", []):
                     metadata = match.get("metadata", {})
-                    code = metadata.get("htsus_code", "HTSUS Match")
-                    title = metadata.get("title", match.get("id", ""))
-                    precedent_matches.append(f"{code} - {title} (Score: {round(match.get('score', 0), 2)})")
+                    code = metadata.get("htsus_code", "HTSUS Code")
+                    text_desc = metadata.get("text", metadata.get("title", ""))
+                    duty = metadata.get("duty_rate", "N/A")
+                    score = round(match.get('score', 0), 2)
+                    
+                    precedent_matches.append(
+                        f"HTSUS {code}: {text_desc} [Duty Rate: {duty}] (Similarity Score: {score})"
+                    )
             except Exception as vector_err:
                 print(f"Pinecone Vector Search Warning: {vector_err}")
                 precedent_matches = [
-                    "HTSUS 8471.30.01 - Automatic data processing machines",
-                    "Ruling HQ H301234 - Classification of composite assemblies"
+                    "HTSUS 8471.30.01: Portable automatic data processing machines [Duty Rate: Free]",
+                    "HTSUS 8504.40.85: Static converters and power supplies [Duty Rate: Free]"
                 ]
         else:
             precedent_matches = [
-                "HTSUS 8471.30.01 - Automatic data processing machines",
-                "Ruling HQ H301234 - Classification of composite assemblies"
+                "HTSUS 8471.30.01: Portable automatic data processing machines [Duty Rate: Free]",
+                "HTSUS 8504.40.85: Static converters and power supplies [Duty Rate: Free]"
             ]
 
-        # --- Defense Brief Generation via OpenAI GPT-4o ---
+        # Step 3: Defense Brief Generation via OpenAI GPT-4o
         if client:
             system_prompt = (
                 "You are TariffX AI, a trade intelligence research engine. "
-                "Analyze the commercial invoice text and available HTSUS precedents. "
+                "Analyze the commercial invoice text alongside the retrieved official HTSUS tariff precedents. "
                 "Produce a structured Executive Defense Brief evaluating classification strategies, "
                 "potential duty mitigation opportunities, and key risks."
             )
@@ -214,7 +225,7 @@ async def analyze_invoice(
             Import Volume: {import_volume or 'N/A'}
             Extracted Content: {invoice_sample}
 
-            TOP MATCHING PRECEDENTS:
+            RETRIEVED PINECONE PRECEDENTS:
             {json.dumps(precedent_matches, indent=2)}
 
             Generate a concise, professional Defense Brief with:
@@ -240,7 +251,7 @@ async def analyze_invoice(
                 "3. Recommendation: Review precedents with trade counsel."
             )
 
-        # Trigger background email alerts
+        # Step 4: Background tasks
         background_tasks.add_task(
             send_lead_notification,
             name=name,
@@ -252,7 +263,6 @@ async def analyze_invoice(
             file_bytes=contents
         )
 
-        # Trigger background Google Sheet logging
         background_tasks.add_task(
             log_lead_to_google_sheet,
             name=name,

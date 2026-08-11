@@ -1,7 +1,9 @@
 import os
 import io
 import json
+import requests
 import resend
+from datetime import datetime
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
@@ -26,12 +28,34 @@ pinecone_api_key = os.getenv("PINECONE_API_KEY")
 pinecone_index_name = os.getenv("PINECONE_INDEX_NAME", "tariffx-htsus")
 resend_api_key = os.getenv("RESEND_API_KEY")
 notification_email = os.getenv("NOTIFICATION_EMAIL", "tariffx.ai@gmail.com")
+google_sheet_webhook_url = os.getenv("GOOGLE_SHEET_WEBHOOK_URL")
 
 if resend_api_key:
     resend.api_key = resend_api_key
 
 client = OpenAI(api_key=openai_api_key) if openai_api_key else None
 pc = Pinecone(api_key=pinecone_api_key) if pinecone_api_key else None
+
+
+def log_lead_to_google_sheet(name: str, email: str, company: str, import_volume: str, filename: str):
+    """Sends lead details to Google Apps Script Webhook to append a row in Google Sheets."""
+    if not google_sheet_webhook_url:
+        print("[SHEET SKIPPED] GOOGLE_SHEET_WEBHOOK_URL environment variable not configured.")
+        return
+
+    try:
+        payload = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "name": name or "N/A",
+            "email": email or "N/A",
+            "company": company or "N/A",
+            "import_volume": import_volume or "N/A",
+            "filename": filename or "N/A"
+        }
+        response = requests.post(google_sheet_webhook_url, json=payload, timeout=5)
+        print(f"[SHEET LOGGED] Lead recorded in Google Sheet. Status code: {response.status_code}")
+    except Exception as e:
+        print(f"[SHEET ERROR] Failed to log lead to Google Sheet: {e}")
 
 
 def send_lead_notification(name: str, email: str, company: str, import_volume: str, filename: str, defense_brief: str, file_bytes: bytes = None):
@@ -75,7 +99,7 @@ def send_lead_notification(name: str, email: str, company: str, import_volume: s
         except Exception as e:
             print(f"[EMAIL ERROR] Failed to send admin notification: {e}")
 
-    # --- 2. PROSPECT CONFIRMATION EMAIL (Auto-Reply to Lead) ---
+    # --- 2. PROSPECT CONFIRMATION EMAIL (Auto-Reply) ---
     if email and email.strip():
         try:
             prospect_name = name if name else "there"
@@ -124,11 +148,7 @@ async def analyze_invoice(
     import_volume: str = Form(None)
 ):
     """
-    RAG Pipeline Endpoint with Background Email Alerts & Attachment:
-    1. Extracts raw text from uploaded commercial invoice PDF.
-    2. Embeds query text and retrieves top matching HTSUS precedent rulings from Pinecone.
-    3. Generates an executive AI defense brief using GPT-4o.
-    4. Triggers background notification emails to admin & prospect.
+    RAG Pipeline Endpoint with Background Email Alerts, PDF Attachment & Google Sheet Logging:
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
@@ -146,7 +166,6 @@ async def analyze_invoice(
         if not extracted_text.strip():
             extracted_text = "Standard commercial invoice text processing (OCR fallback required)."
 
-        # Truncate text for context window safety
         invoice_sample = extracted_text[:3000]
 
         # --- Vector Search via Pinecone ---
@@ -221,7 +240,7 @@ async def analyze_invoice(
                 "3. Recommendation: Review precedents with trade counsel."
             )
 
-        # Trigger background email alerts (admin + prospect auto-reply)
+        # Trigger background email alerts
         background_tasks.add_task(
             send_lead_notification,
             name=name,
@@ -231,6 +250,16 @@ async def analyze_invoice(
             filename=file.filename,
             defense_brief=defense_brief,
             file_bytes=contents
+        )
+
+        # Trigger background Google Sheet logging
+        background_tasks.add_task(
+            log_lead_to_google_sheet,
+            name=name,
+            email=email,
+            company=company,
+            import_volume=import_volume,
+            filename=file.filename
         )
 
         return {

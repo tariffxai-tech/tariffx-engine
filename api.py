@@ -64,7 +64,7 @@ def send_lead_notification(name: str, email: str, company: str, import_volume: s
         print("[EMAIL SKIPPED] Resend API key not configured.")
         return
 
-    # --- 1. ADMIN ALERT EMAIL (To You) ---
+    # --- 1. ADMIN ALERT EMAIL ---
     if notification_email:
         try:
             admin_html = f"""
@@ -147,13 +147,6 @@ async def analyze_invoice(
     company: str = Form(None),
     import_volume: str = Form(None)
 ):
-    """
-    RAG Pipeline Endpoint:
-    1. Extract PDF text.
-    2. Vectorize text and query Pinecone for top HTSUS matching precedents.
-    3. Feed precedent records to GPT-4o for an executive AI defense brief.
-    4. Fire background tasks: Admin email w/ PDF attachment, Auto-reply, and Google Sheet logging.
-    """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -172,7 +165,7 @@ async def analyze_invoice(
 
         invoice_sample = extracted_text[:3000]
 
-        # Step 2: Vector Search Pinecone for real HTSUS precedents
+        # Step 2: Vector Search Pinecone for real HTSUS precedents across 100k+ records
         precedent_matches = []
         if client and pc and pinecone_index_name:
             try:
